@@ -46,9 +46,44 @@ func NewNode(isParent bool, parentNode string, childNodes []string, selfAddress 
 		childNodes: childNodes,
 		selfAddress: selfAddress,
 		// mu's zero value is a usable unlocked mutex -> don't set it 
-
-
 	}
+}
+
+// Get handles read requests: GET /get?key=...
+// The (n *Node) receiver binds this METHOD to a specific node
+func (n *Node) Get(w http.ResponseWriter, r *http.Request){
+	// r.URL.Query() parses "?key=..." part of URL into a lookup table
+	key := r.URL.Query().Get("key")
+
+	if key == "" {
+		// http.Error writes an error message AND sets the HTTP status code,
+		// then we return early so we don't keep processing a bad request.
+		http.Error(w, "Missing key in request", http.StatusBadRequest)
+		return
+	}
+
+	// Take a READ lock: many Get requests can hold this at the same time
+	// However, if a writer is mid-write, we wait until it's done
+	n.mu.RLock()
+
+
+	// reading map returns TWO things - 
+	// 		1. value -> stored value
+	// 		2. exists -> bool
+	value, exists := n.data[key]
+
+	n.mu.RUnlock()
+
+	if !exists {
+		http.Error(w, "Key not found", http.StatusNotFound)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	// Fprintf is like printf, but writes to w
+	fmt.Fprintf(w, "Value: %s\n", value)
+
+
 }
 
 
@@ -57,10 +92,22 @@ func NewNode(isParent bool, parentNode string, childNodes []string, selfAddress 
 // where execution begins
 func main(){
 
-	// http.HandleFunc registers "handler" for URL path.
-	//    w http.ResponseWriter -> I WRITE my response into this.
-	//    r *http.Request -> the incoming request I READ from
-	// r is a pointer to a request
+	// create this node
+	// hard-code as PARENT with no children and no addresses for now
+	node := NewNode(true, "", nil, "")
+
+	// Hand the node's GET method to router
+	http.HandleFunc("/get", node.Get)
+
+	fmt.Println("Listening on http://localhost:8080")
+	http.ListenAndServe(":8080", nil)
+
+
+
+
+
+
+
 
 
 	// Fprintln writes text to first arg -> w is response so text goes back to caller
@@ -68,12 +115,6 @@ func main(){
 		fmt.Fprintln(w, "Distributed-Database node is alive!")
 	})
 
-	fmt.Println("Listening on http://localhost:8080")
 
-	// ListenAndServe starts web server and blocks here forever, 
-	// handling requests, until program is stopped or it errors.
-	// nil means "use default router (one HandleFunc registered on)"
-	http.ListenAndServe(":8080", nil)
-
-
+	
 }
