@@ -116,6 +116,61 @@ func (n *Node) Put(w http.ResponseWriter, r *http.Request){
 
 }
 
+// Delete 
+// handles: DELETE /delete?key=...
+func (n *Node) Delete(w http.ResponseWriter, r *http.Request){
+	// Go's default router filters by path, not HTTP method
+	// http.MethodDelete is just constant string "DELETE."
+	if r.Method != http.MethodDelete{
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// key comes from URL (?key=...)
+	key := r.URL.Query().Get("key")
+	if key == "" {
+		http.Error(w, "Missing key in request", http.StatusBadRequest)
+		return
+	}
+
+	// Deleting mutates map -> needs WRITE lock
+	n.mu.Lock()
+
+	// delete() is go Builtin. 
+	// if key isn't in map, this is a harmless no-op
+	delete(n.data,key)
+	n.mu.Unlock()
+
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, "Deleted key: %s\n", key)
+}
+
+
+// DisplayData handles: Get /display
+// returns entire key-value store as one JSON object.
+func (n *Node) DisplayData(w http.ResponseWriter, r *http.Request) {
+	// use READ lock
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+
+	// Tell the caller the body is JSON. Headers must be set BEFORE WriteHeader.
+	w.Header().Set("Content-Type", "application/json")
+
+
+	// Go -> JSON
+	// json.Marshal turns a Go value into a []byte of JSON, which is opposite of Decode
+	// It returns (bytes, error); we must check the error 
+	jsonData, err := json.Marshal(n.data)
+	if err != nil {
+		// 500 = "something broke on OUR side," not the caller's fault.
+		http.Error(w, "Error encoding data to JSON", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	// w.Write sends raw bytes as the response body (we already have JSON bytes).
+	w.Write(jsonData)
+}
 
 
 
@@ -131,6 +186,12 @@ func main(){
 
 	// Put
 	http.HandleFunc("/put", node.Put)
+
+	// Delete
+	http.HandleFunc("/delete", node.Delete)
+
+	// Display
+	http.HandleFunc("/display", node.DisplayData)
 
 	
 
