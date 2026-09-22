@@ -2,9 +2,13 @@ package main
 
 import (
 	"encoding/json" // decodes/encodes JSON <-> Go values
-	"fmt"
+	"flag"          // command-line flag parsing
+	"fmt"           // log.Fatal prints an error and exits
+	"log"
 	"net/http"
-	"sync" // gives sync.RWMutex, which allows many goroutines to read data at same time, but gives only one goroutine exclusive access when it needs to write
+	"os"      // os.Getenv: for reading env vars
+	"strings" // strings.Split: parse comma-separated child list
+	"sync"    // gives sync.RWMutex, which allows many goroutines to read data at same time, but gives only one goroutine exclusive access when it needs to write
 )
 
 // Node represents single server in distributed database.
@@ -176,40 +180,55 @@ func (n *Node) DisplayData(w http.ResponseWriter, r *http.Request) {
 
 // where execution begins
 func main(){
+	// Command-line flags 
+	// flag.Bool/flag.String(name, defaultValue, helpText)
+	// return POINTERS (*bool, *string), not values.
+	// The pointed-to value is empty until flag.Parse() runs.
+	isParent := flag.Bool("parent", false, "Set to true if this is the parent node")
+	childNodes := flag.String("childNodes", "", "Comma-separated list of child node addresses (parent only)")
+	port := flag.String("port", "8080", "Port to run this node on")
 
-	// create this node
-	// hard-code as PARENT with no children and no addresses for now
-	node := NewNode(true, "", nil, "")
+	// flag.Parse() reads the command-line arguments and fills in the flag variables above. 
+	flag.Parse()
+
+	// Environment variables 
+	parentNodeEnv := os.Getenv("PARENT_NODE")   // who my parent is (children set this)
+	selfAddressEnv := os.Getenv("SELF_ADDRESS") // how others reach me
+
+	// Decide our own address
+	var selfAddress string
+	if selfAddressEnv != "" {
+		selfAddress = selfAddressEnv
+	} else {
+		selfAddress = "localhost:" + *port 
+	}
+
+	// Turn the comma-separated child list into a []string slice ---
+	var childNodeList []string
+	if *childNodes != "" {
+		childNodeList = strings.Split(*childNodes, ",")
+	}
+
+	node := NewNode(*isParent, parentNodeEnv, childNodeList, selfAddress)
+
 
 	// Get
 	http.HandleFunc("/get", node.Get)
-
 	// Put
 	http.HandleFunc("/put", node.Put)
-
 	// Delete
 	http.HandleFunc("/delete", node.Delete)
-
 	// Display
 	http.HandleFunc("/display", node.DisplayData)
-
-	
-
 	// Health Check
 	// Fprintln writes text to first arg -> w is response so text goes back to caller
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request){
 		fmt.Fprintln(w, "Distributed-Database node is alive!")
 	})
 
-	fmt.Println("Listening on http://localhost:8080")
+	fmt.Printf("Node running on port %s (Parent: %v, Parent Node: %s, Child Nodes: %v)\n", *port, *isParent, node.parentNode, childNodeList)
 
-	http.ListenAndServe(":8080", nil)
-
-
-
-
-	
-
-
-	
+	// Serve on the CONFIGURED port. log.Fatal prints the error and exits(1)
+	// if ListenAndServe ever returns (it only returns on failure).
+	log.Fatal(http.ListenAndServe(":"+*port, nil))
 }
