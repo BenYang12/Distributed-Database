@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json" // decodes/encodes JSON <-> Go values
 	"fmt"
 	"net/http"
 	"sync" // gives sync.RWMutex, which allows many goroutines to read data at same time, but gives only one goroutine exclusive access when it needs to write
@@ -12,21 +13,16 @@ type Node struct{
 	// true -> accept writes and is source of truth
 	// false -> hold read-only copy and serve reads
 	isParent bool
-	
 	// actual key-value store
 	data map[string]string
-
 	// sync.RWMutex is a "read-write mutex":
 	// 		- Call mu.RLock()/mu.RUnlock() around READS (many readers allowed at once)
 	// 		- Call mu.Lock()/mu.Unlock() around WRITES (one writer with exclusive access)
 	mu sync.RWMutex
-
 	// list of child addresses this node replicates to.
 	childNodes []string
-
 	// address of this node's parent
 	parentNode string
-
 	// how OTHER nodes can reach THIS node over network
 	selfAddress string
 
@@ -82,7 +78,41 @@ func (n *Node) Get(w http.ResponseWriter, r *http.Request){
 	w.WriteHeader(http.StatusOK)
 	// Fprintf is like printf, but writes to w
 	fmt.Fprintf(w, "Value: %s\n", value)
+}
 
+// Put handles write requests: POST /put with a JSON body {"key":"...","value":"..."}
+func (n *Node) Put(w http.ResponseWriter, r *http.Request){
+	// decode JSON body into a Go map
+	var body map[string]string
+
+    // json.NewDecoder(r.Body) wraps request body in a JSON decoder
+	// .Decode(&body) reads JSON and fills in body (POINTER)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "Invalid request payload", http.StatusBadRequest)
+		return
+	}
+	// defer schedules r.Body.Close() to run when this function returns universally
+	// frees resources of the body
+	defer r.Body.Close()
+
+
+	key, keyOk := body["key"]
+	value, valueOk := body["value"]
+
+	if !keyOk || !valueOk {
+		http.Error(w, "Missing key or value in request", http.StatusBadRequest)
+		return
+	}
+
+	n.mu.Lock()
+	n.data[key] = value // the actual store
+	n.mu.Unlock()
+
+	// Later, parent will replicate this write out to its children
+
+
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w,"Stored: %s -> %s\n", key, value)
 
 }
 
@@ -96,24 +126,28 @@ func main(){
 	// hard-code as PARENT with no children and no addresses for now
 	node := NewNode(true, "", nil, "")
 
-	// Hand the node's GET method to router
+	// Get
 	http.HandleFunc("/get", node.Get)
 
+	// Put
+	http.HandleFunc("/put", node.Put)
+
+	
+
+	// Health Check
+	// Fprintln writes text to first arg -> w is response so text goes back to caller
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request){
+		fmt.Fprintln(w, "Distributed-Database node is alive!")
+	})
+
 	fmt.Println("Listening on http://localhost:8080")
+
 	http.ListenAndServe(":8080", nil)
 
 
 
 
-
-
-
-
-
-	// Fprintln writes text to first arg -> w is response so text goes back to caller
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request){
-		fmt.Fprintln(w, "Distributed-Database node is alive!")
-	})
+	
 
 
 	
