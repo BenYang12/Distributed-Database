@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"         // bytes.NewBuffer: wrap JSON bytes as a request body
 	"encoding/json" // decodes/encodes JSON <-> Go values
 	"flag"          // command-line flag parsing
 	"fmt"           // log.Fatal prints an error and exits
@@ -112,7 +113,7 @@ func (n *Node) Put(w http.ResponseWriter, r *http.Request){
 	n.data[key] = value // the actual store
 	n.mu.Unlock()
 
-	// Later, parent will replicate this write out to its children
+	n.replicateToChildren(key, value)
 
 
 	w.WriteHeader(http.StatusOK)
@@ -176,13 +177,71 @@ func (n *Node) DisplayData(w http.ResponseWriter, r *http.Request) {
 	w.Write(jsonData)
 }
 
+// Replicate is Child node's inbox: POST /replicate with {"key":"...","value":"..."}
+// The parent calls this on each child to "push out" a write
+func (n *Node) Replicate(w http.ResponseWriter, r *http.Request){
+	// Only children accept replicated data
+	if n.isParent{
+		http.Error(w, "Parent node cannot receive replication data!", http.StatusBadRequest)
+		return
+	}
+
+	// Put
+	// 1. decode body (JSON -> Go object)
+	// 2. validate
+	// 3. store
+	var body map[string]string
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil{
+		http.Error(w, "Invalid replication payload", http.StatusBadRequest)
+		return
+	}
+
+	key, keyOk := body["key"]
+	value, valueOk := body["value"]
+	if !keyOk || !valueOk {
+		http.Error(w, "Missing key or value in replication data", http.StatusBadRequest)
+		return
+	}
+
+	n.mu.Lock()
+	n.data[key] = value
+	n.mu.Unlock()
+
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, "Replicated: %s -> %s\n", key, value)
+}
+
+// replicateToChildren fans a single write out to EVERY child, concurrently
+func (n *Node) replicateToChildren(key, value string){
+	// iterate over each child address
+	// range gives (index, value)
+	for _, childAddr := range(n.childNodes){
+		// go func(...){...}(childaddr) launches an immediately invoked anonymous function in a NEW goroutine.
+		go func(addr string){
+			// build JSON body
+			replicationData := map[string]string{"key": key, "value": value}
+			// json.Marhsal returns (bytes, error)
+			jsonData, _ := json.Marshal(replicationData)
+
+
+			// http.Post(url, contentType, body) sends a POST
+			// bytes.NewBuffer turns []byte into io.Reader that Post can read the body from
+			resp, err := http.Post("http://"+addr+"/replicate", "application/json", bytes.NewBuffer(jsonData))
+			if err != nil {
+				log.Printf("Failed to replicate to %s: %v", addr, err)
+				return // NOTE: on error, resp is nil — we must NOT touch resp.Body here.
+			}
+			defer resp.Body.Close()
+		}(childAddr) // childAddr is passed in as "addr"
+
+	}
+}
 
 
 // where execution begins
 func main(){
 	// Command-line flags 
-	// flag.Bool/flag.String(name, defaultValue, helpText)
-	// return POINTERS (*bool, *string), not values.
+	// flag.Bool/flag.String(name, defaultValue, helpText) return POINTERS (*bool, *string), not values.
 	// The pointed-to value is empty until flag.Parse() runs.
 	isParent := flag.Bool("parent", false, "Set to true if this is the parent node")
 	childNodes := flag.String("childNodes", "", "Comma-separated list of child node addresses (parent only)")
@@ -225,6 +284,10 @@ func main(){
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request){
 		fmt.Fprintln(w, "Distributed-Database node is alive!")
 	})
+	// Replicate
+	http.HandleFunc("/replicate", node.Replicate)
+
+
 
 	fmt.Printf("Node running on port %s (Parent: %v, Parent Node: %s, Child Nodes: %v)\n", *port, *isParent, node.parentNode, childNodeList)
 
