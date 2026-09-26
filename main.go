@@ -7,6 +7,7 @@ import (
 	"fmt"           // log.Fatal prints an error and exits
 	"io"            // io.ReadAll/ io.NopCloser
 	"log"
+	"net"
 	"net/http"
 	"os"      // os.Getenv: for reading env vars
 	"strings" // strings.Split: parse comma-separated child list
@@ -356,6 +357,41 @@ func (n *Node) replicateDeletionToChildren(key string) {
 	}
 }
 
+// GetSelfAddress() finds an address other nodes can actually reach this one at, and appends the given port. 
+// Returns (address, nil) or ("", error)
+func GetSelfAddress(port string) (string, error){
+	// InterfaceAddrs returns ALL of this machine's network addresses.
+	// It returns (addrs, error)
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return "", err
+	}
+
+	var ipAddr string
+	for _, addr := range addrs{
+		// addr is a net.Addr (INTERFACE). Its concrete type is *net.IPNet.
+		// TYPE ASSERTION asks "is concrete value behind addr a *net.IPNet?"
+		//   ipNet -> the concrete value if yes
+		//   ok    -> false if not (then we skip; no panic)
+		// Also require it not to be a loopback address
+		if ipNet, ok := addr.(*net.IPNet); ok && !ipNet.IP.IsLoopback(){
+			// To4() returns non-nill only for IPv4 addresses. take first IPv4, non-loopback address and stop
+			if ipNet.IP.To4() != nil{
+				ipAddr = ipNet.IP.String() // e.g. "192.168.1.42"
+				break
+			}
+		}
+	}
+
+	if ipAddr == "" {
+		return "", fmt.Errorf("could not determine self IP address")
+	}
+
+	// Sprintf builds a string (unlike Printf, which prints it): "192.168.1.42:8081".
+	return fmt.Sprintf("%s:%s", ipAddr, port), nil
+}
+
+
 // where execution begins
 func main() {
 	// Command-line flags
@@ -377,7 +413,13 @@ func main() {
 	if selfAddressEnv != "" {
 		selfAddress = selfAddressEnv
 	} else {
-		selfAddress = "localhost:" + *port
+		// Auto-detect routable addr
+		addr, err := GetSelfAddress(*port)
+		if err != nil {
+			log.Fatalf("Failed to get self address: %v", err)
+		}
+		selfAddress = addr
+
 	}
 
 	// Turn the comma-separated child list into a []string slice ---
@@ -405,6 +447,7 @@ func main() {
 	http.HandleFunc("/replicate", node.Replicate)
 
 	fmt.Printf("Node running on port %s (Parent: %v, Parent Node: %s, Child Nodes: %v)\n", *port, *isParent, node.parentNode, childNodeList)
+	fmt.Println("Self address detected as:", selfAddress)
 
 	// Serve on the CONFIGURED port. log.Fatal prints the error and exits(1)
 	// if ListenAndServe ever returns (it only returns on failure).
