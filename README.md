@@ -1,8 +1,10 @@
 # Distributed-Database
 
-Hello! I'm really interested in distributed systems and a career in infrastructure, so I recently embarked on building a **Redis-like distributed key-value store** using Golang(Go) and deploying it on Amazon Web Services (AWS). I decided to use **single-leader replication**, where one parent owns every write, child nodes serve reads,and new children can join a running cluster and catch up automatically.
+Hello! I'm really interested in distributed systems and a career in infrastructure, so I recently embarked on building a **Redis-like distributed key-value store** using Golang(Go) and deploying it on Amazon Web Services (AWS).
 
-It uses only the Go standard library, ships as a Docker image, and runs live on AWS as a 3-node cluster of Docker containers on EC2.
+I decided to use **single-leader replication**, where one parent owns every write, child nodes serve reads,and new children can join a running cluster and catch up automatically.
+
+It uses the Go standard library, ships as a Docker image, and runs live on AWS as a 3-node cluster of Docker containers on EC2.
 
 <p align="center"><img src="docs/diagrams/02-architecture.svg" alt="Architecture" width="850"></p>
 
