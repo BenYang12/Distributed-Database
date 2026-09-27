@@ -1,6 +1,6 @@
 # Distributed-Database
 
-Hello! I'm really interested in distributed systems, so I recently embarked on building a **Redis-like distributed key-value store** using Golang(Go) and deploying it on Amazon Web Services (AWS). I decided to use **single-leader replication**, where one parent owns every write, child nodes serve reads,and new children can join a running cluster and catch up automatically.
+Hello! I'm really interested in distributed systems and a career in infrastructure, so I recently embarked on building a **Redis-like distributed key-value store** using Golang(Go) and deploying it on Amazon Web Services (AWS). I decided to use **single-leader replication**, where one parent owns every write, child nodes serve reads,and new children can join a running cluster and catch up automatically.
 
 It uses only the Go standard library, ships as a Docker image, and runs live on AWS as a 3-node cluster of Docker containers on EC2.
 
@@ -8,19 +8,16 @@ It uses only the Go standard library, ships as a Docker image, and runs live on 
 
 ## Why this design?
 
-One database server has limited RAM and CPU, and if it dies, everything dies. Moreover, since around 80% of requests in typical applications are READ operations, separating READ and WRITE operations becomes crucial for optimizing performance.
-
-So...
-I designed my database to send every write to **one parent** (one source of truth, so no
-conflicts) and spread reads across **many children** (add a child, get more read capacity).
+One database server has limited RAM and CPU, and if it dies, everything dies. Moreover, since around 80% of requests in typical applications are READ operations, separating READ and WRITE operations becomes crucial for optimizing performance. Thus, I designed my database to send every write to **one parent** (one source of truth, so no conflicts), and spread reads across **many children** (add a child, get more read capacity).
 
 <p align="center"><img src="docs/diagrams/01-evolution.svg" alt="From one server to parent/child" width="850"></p>
 
-This is the same pattern as PostgreSQL, MySQL, and Redis read replicas. The trade-offs:
-the parent is a write bottleneck and a single point of failure, and because replication
-is **asynchronous**, a child can briefly return stale data (**eventual consistency**).
+This is the same pattern as PostgreSQL, MySQL, and Redis read replicas.
 
-## How it works
+Trade-offs:
+The parent is a write bottleneck and a single point of failure, and because replication is **asynchronous**, a child can briefly return stale data (**eventual consistency**).
+
+## How my database works
 
 **Writes.** The parent stores the key under a write lock (`sync.RWMutex`). It then starts
 **one goroutine per child** to `POST /replicate`, and replies without waiting for them.
@@ -41,7 +38,7 @@ in between still reach it.
 
 <p align="center"><img src="docs/diagrams/04-join.svg" alt="Join sequence" width="780"></p>
 
-The core of replication:
+The core of replication (great way to learn about goroutines!):
 
 ```go
 func (n *Node) replicateToChildren(key, value string) {
@@ -103,18 +100,12 @@ cluster isn't open to the internet.
 
 ## Results
 
-Measured on a 3-node cluster (Linux, 2 vCPU, median of 3 runs):
+<p align="center"><img src="docs/diagrams/05-read-scaling.svg" alt="Read throughput" width="620"></p>
 
-| Metric | Result |
-| --- | --- |
-| Read latency (5 concurrent clients) | p50 **0.16 ms** · p99 **0.91 ms** |
-| Write latency at parent (replicating to 2 children) | p50 **0.86 ms** · p99 **7.1 ms** · ~3,700 writes/s |
-| Replication lag (parent ack → readable on child, 1,000 writes) | p50 **0.41 ms** · p99 **1.5 ms** · 0 lost |
-| New-node catch-up, 10k keys (0.2 MB snapshot) | **25 ms** |
-| New-node catch-up, 100k keys (2.3 MB snapshot) | **139 ms** |
-
-All nodes ran on one machine, so replication lag here leaves out real network delay.
-Across separate machines, add one network round trip.
+10,000 concurrent `GET`s (5 in flight at a time), spread round-robin across nodes, using
+`tests/stresstest.go`: **1.74 s on one node versus 0.62 s on three, a 2.8× throughput
+increase.** These numbers came from a single MacBook Pro, so all nodes shared one CPU. The
+EC2 numbers are still to come.
 
 ## Known issues (found by testing)
 
@@ -130,13 +121,14 @@ Across separate machines, add one network round trip.
 
 ## Next steps
 
-- [ ] **Persistence:** append-only log and snapshots on disk, so a node survives a restart
+- [ ] **Persistence:** append-only log and snapshots, so a node survives a restart
 - [ ] **Health checks:** heartbeat children and drop dead ones from the replica set
-- [ ] **Parent failover → consensus:** remove the single point of failure by electing a new
-      parent with [Raft](https://raft.github.io/raft.pdf)
-- [ ] **Sharding:** partition keys with consistent hashing to scale _writes_, not just reads
-- [ ] **Tunable consistency:** quorum reads and writes (Dynamo-style `R + W > N`)
-- [ ] **Real tests:** table-driven `httptest` unit tests and a race-detector run (`go test -race`)
+- [ ] **Parent failover:** remove the single point of failure with leader election (**Raft**)
+- [ ] **Sharding:** consistent hashing to scale _writes_, not just reads
+- [ ] **Tunable consistency:** quorum reads/writes (`R + W > N`)
+- [ ] **Multi-machine deploy:** one node per EC2 instance (or ECS), with EC2 load-test numbers
+- [ ] **Real tests:** table-driven `httptest` unit tests under `go test -race`, plus fixes
+      for the two bugs above (per-key sequence numbers; listen before registering)
 
 ## License
 
