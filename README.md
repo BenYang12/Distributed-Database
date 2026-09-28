@@ -1,6 +1,6 @@
 # Distributed-Database
 
-Hello! I'm really interested in distributed systems and a career in infrastructure, so I recently embarked on building a **Redis-like distributed key-value store** using Golang(Go) and deploying it on Amazon Web Services (AWS).
+Hello! I'm really interested in distributed systems and pursuing a career in infrastructure, so I recently embarked on building a **Redis-like distributed key-value store** using Golang(Go) and deploying it on Amazon Web Services (AWS).
 
 I decided to use **single-leader replication**, where one parent owns every write, child nodes serve reads,and new children can join a running cluster and catch up automatically.
 
@@ -10,53 +10,67 @@ It uses the Go standard library, ships as a Docker image, and runs live on AWS a
 
 ## Why this design?
 
-One database server has limited RAM and CPU, and if it dies, everything dies. Moreover, since around 80% of requests in typical applications are READ operations, separating READ and WRITE operations becomes crucial for optimizing performance. Thus, I designed my database to send every write to **one parent** (one source of truth, so no conflicts), and spread reads across **many children** (add a child, get more read capacity).
+A database that lives on one server has two big problems. First, it can only handle so much traffic (One machine has a fixed amount of CPU and memory). Second, if it goes down, everything goes down!
 
-<p align="center"><img src="docs/diagrams/01-evolution.svg" alt="From one server to parent/child" width="850"></p>
+The obvious fix is to add more servers. But if every server accepts writes, two servers can accept conflicting writes to the same key at the same moment, and then you have to decide who wins. That is one of the hardest problems in distributed systems.
 
-This is the same pattern as PostgreSQL, MySQL, and Redis read replicas.
+Most applications are read-heavy. Roughly 80% of requests just read data, so I used a design that takes advantage of that:
 
-Trade-offs:
-The parent is a write bottleneck and a single point of failure, and because replication is **asynchronous**, a child can briefly return stale data (**eventual consistency**).
+- One parent node handles every write. This node is the single source of truth, so writes can never conflict.
+- Many child nodes. Each holds a full copy of the data and answers reads. If you need more read capacity, just simply add more children!
 
-## How my database works
+TLDR: I implemented single-leader replication. It's the same idea behind PostgreSQL read replicas, MySQL replication, and Redis replicas.
 
-**Writes.** The parent stores the key under a write lock (`sync.RWMutex`). It then starts
-**one goroutine per child** to `POST /replicate`, and replies without waiting for them.
-If a client sends a write to a child, the child **forwards** it to the parent.
+## How it works
 
-**Reads.** Any node answers `GET /get` from its local map under a _read_ lock, so many
-reads can run at the same time.
+Every running copy of the program is one node. The same binary can start as either a parent or a child, depending on command-line flags and environment variables. Nodes talk to each other over plain HTTP with JSON bodies.
 
-**Deletes.** A child answers a client's delete with a **307 redirect** to the parent. The
-parent then sends the delete to each child with an `X-Replication: true` header, which
-means "this came from the parent: apply it, don't redirect it back."
+### Reads: any node, in parallel
 
-<p align="center"><img src="docs/diagrams/03-write-delete.svg" alt="Write and delete paths" width="850"></p>
+Any node answers GET /get?key=... straight from its own in-memory map.Many HTTP requests are handled at the same time (Go runs each one in its own goroutine), so the map is protected by a sync.RWMutex (a read-write lock). Reads take the read lock, which lets any number of them run at once. Writes take the write lock, which gives them exclusive access. These locks help me prevent two goroutines from touching the same map at the same time (race condition).
 
-**Joining.** A new child finds its own IP, registers with the parent (`/addChild`), then
-pulls a full snapshot (`/display`). It registers _before_ syncing so that writes landing
-in between still reach it.
+### Writes: the parent stores, then fans out
 
-<p align="center"><img src="docs/diagrams/04-join.svg" alt="Join sequence" width="780"></p>
+When the parent receives POST /put, it:
 
-The core of replication (great way to learn about goroutines!):
+1. stores the key under the write lock
+2. starts one goroutine per child that sends the change to that child's /replicate endpoint, and replies to the client right away without waiting for the children (asynchronous replication)
 
-```go
-func (n *Node) replicateToChildren(key, value string) {
-	for _, childAddr := range n.childNodes {
-		go func(addr string) { // one goroutine per child, fire-and-forget
-			body, _ := json.Marshal(map[string]string{"key": key, "value": value})
-			resp, err := http.Post("http://"+addr+"/replicate", "application/json", bytes.NewBuffer(body))
-			if err != nil {
-				log.Printf("Failed to replicate to %s: %v", addr, err)
-				return
-			}
-			defer resp.Body.Close()
-		}(childAddr)
-	}
-}
-```
+Writes sent to a child are forwarded to the parent
+
+### Deletes: redirect up, replicate down
+
+If a client sends DELETE to a child, the child responds with a 307 Temporary Redirect pointing to the parent. The parent deletes the key and sends the delete to every child with an {X-Replication: true} header. When a child sees that header, it knows the request came from the parent, so it applies the delete locally and stops. Without that marker, the child would redirect the parent's own delete back to the parent, which leads to a loop.
+
+### Joining a running cluster
+
+Children don't have to be listed ahead of time. When a new child starts, it:
+
+1. finds its own address
+2. registers with the parent (POST /addChild)
+3. pulls a full snapshot of the parent's data (GET /display)
+
+It registers before syncing. If it synced first, any write that arrived between the sync and the registration would be missed. This is the same idea as auto-scaling in the cloud: start another container, and it joins the cluster and fills itself in.
+
+## Measuring it
+
+To check that adding nodes really adds read capacity, I wrote a load tester in Go (`tests/stresstest.go`). It sends 10,000 `GET` requests, spreads them round-robin across the nodes, and times the whole run. Building it taught me several core Go concurrency tools:
+
+- a **buffered channel used as a semaphore**, to cap how many requests are in flight at once,
+- a **`sync.WaitGroup`**, to wait until every request goroutine has finished,
+- **`sync/atomic`**, for a counter that many goroutines can safely increment, and
+- a shared **`http.Transport`**, which reuses TCP connections instead of opening a new one for every request.
+  **Result:** 10,000 reads took **1.74 s on one node and 0.62 s across three**, which is a **2.8× throughput increase** (5,747 → 16,047 requests/second).
+
+These numbers come from my laptop, so all three nodes shared one CPU. That makes the result conservative. Next, I'm re-running the benchmarks with one node per EC2 instance and a separate load-generator machine, and adding latency percentiles (p50/p99) and replication-lag measurements.
+
+## Deployment
+
+I packaged the node as a **multi-stage Docker image**. The first stage uses the full Go toolchain to compile a static Linux binary. The second stage copies only that binary into a small Alpine image, so the final image doesn't carry the compiler.
+
+On AWS, the cluster runs on an **EC2 t3.micro** instance (Amazon Linux 2023). I build the image on the instance and start three containers on a shared Docker network, where they find each other by container name (`parent`, `child1`, `child2`). The **security group** only allows SSH and the three node ports from my own IP, so the database isn't open to the public internet.
+
+All three nodes currently share one VM. That's a real cloud deployment, but not real fault tolerance, because if that one machine fails, the whole cluster goes down. Spreading the nodes across separate instances is on my roadmap.
 
 ## Quick start
 
@@ -82,44 +96,26 @@ docker run -d --name child2 --network distnet -p 8082:8080 \
   -e PARENT_NODE=parent:8080 -e SELF_ADDRESS=child2:8080 distdb -port 8080
 ```
 
-| Endpoint                                     | Purpose                            |
-| -------------------------------------------- | ---------------------------------- |
-| `GET /get?key=`                              | read (any node)                    |
-| `POST /put`                                  | write (parent; children forward)   |
-| `DELETE /delete?key=`                        | delete (parent; children redirect) |
-| `GET /display`                               | dump the whole store as JSON       |
-| `POST /replicate`, `/addChild`, `/setParent` | internal cluster traffic           |
+## What I learned
 
-## Deployment
+**Go**
 
-The cluster runs on a single **EC2 t3.micro** (Amazon Linux 2023). On the instance, I
-clone the repo, build the image with Docker, and start the three containers on a
-`distnet` network, the same way as locally. Host ports 8080–8082 map to each container's
-port 8080. The security group only allows SSH and ports 8080–8082 from my IP, so the
-cluster isn't open to the internet.
-
-<p align="center"><img src="docs/diagrams/06-aws.svg" alt="AWS deployment" width="850"></p>
-
-## Results
-
-<p align="center"><img src="docs/diagrams/05-read-scaling.svg" alt="Read throughput" width="620"></p>
-
-10,000 concurrent `GET`s (5 in flight at a time), spread round-robin across nodes, using
-`tests/stresstest.go`: **1.74 s on one node versus 0.62 s on three, a 2.8× throughput
-increase.** These numbers came from a single MacBook Pro, so all nodes shared one CPU. The
-EC2 numbers are still to come.
-
-## Known issues (found by testing)
-
-- **Out-of-order replication.** Each write replicates in its own goroutine, so a child can
-  apply two writes to the same key in the wrong order. After 300 concurrent writes to one
-  key, the parent held `251` and a child held `256`.
-- **Join-window loss.** A child registers and syncs _before_ its HTTP server starts
-  listening, so writes replicated in that gap get "connection refused" and are lost. A
-  child that joined during 400 writes ended with 399 keys.
-- **Best-effort replication, no persistence, single parent.** Failed replications are
-  never retried, data lives only in memory, and there is no failover. On AWS, all nodes
-  also share one VM, so that machine failing takes down the whole cluster.
+- Structs, methods with pointer receivers, maps, slices, and constructor functions
+- Writing HTTP servers and clients with `net/http`: handlers, custom requests, headers, redirects, and proxying
+- JSON encoding and decoding, and Go's explicit error handling
+- Concurrency: goroutines, `sync.RWMutex`, `sync.WaitGroup`, `sync/atomic`, and channels as semaphores
+- Gotchas like passing loop variables into goroutines, and why you can't copy a mutex
+- Interfaces and type assertions (`addr.(*net.IPNet)`) when walking network interfaces
+- Using the race detector to find bugs that normal testing misses
+- Multi-stage Docker builds for Go
+  **Distributed systems**
+- Single-leader replication, and why a single writer avoids conflicts
+- Synchronous vs. asynchronous replication, and the latency vs. consistency trade-off
+- Eventual consistency, and the difference between replication _lag_ and replica _divergence_
+- Message reordering, and why systems need version numbers or logical clocks
+- Idempotency, and using a marker header to prevent replication loops
+- Cluster membership, bootstrapping a new replica, and state transfer
+- The limits of this design: the parent is a write bottleneck and a single point of failure
 
 ## Next steps
 
