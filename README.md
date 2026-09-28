@@ -6,8 +6,6 @@ I decided to use **single-leader replication**, where one parent owns every writ
 
 It uses the Go standard library, ships as a Docker image, and runs live on AWS as a 3-node cluster of Docker containers on EC2.
 
-<p align="center"><img src="docs/diagrams/02-architecture.svg" alt="Architecture" width="850"></p>
-
 ## Why this design?
 
 A database that lives on one server has two big problems. First, it can only handle so much traffic (One machine has a fixed amount of CPU and memory). Second, if it goes down, everything goes down!
