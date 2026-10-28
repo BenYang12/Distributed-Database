@@ -135,6 +135,13 @@ func (n *Node) Put(w http.ResponseWriter, r *http.Request) {
 	}
 
 	n.mu.Lock()
+	if n.wal != nil {
+		if err := n.wal.Append(logEntry{Op: "put", Key: key, Value: value}); err != nil {
+			n.mu.Unlock()
+			http.Error(w, "Failed to persist write", http.StatusInternalServerError)
+			return
+		}
+	}
 	n.data[key] = value // the actual store
 	n.mu.Unlock()
 
@@ -191,6 +198,13 @@ func (n *Node) Delete(w http.ResponseWriter, r *http.Request) {
 
 	// PARENT branch: client initiated delete at source of truth
 	n.mu.Lock()
+	if n.wal != nil {
+		if err := n.wal.Append(logEntry{Op: "delete", Key: key}); err != nil {
+			n.mu.Unlock()
+			http.Error(w, "Failed to persist delete", http.StatusInternalServerError)
+			return
+		}
+	}
 	delete(n.data, key)
 	n.mu.Unlock()
 

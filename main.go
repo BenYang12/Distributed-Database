@@ -18,6 +18,7 @@ func main() {
 	isParent := flag.Bool("parent", false, "Set to true if this is the parent node")
 	childNodes := flag.String("childNodes", "", "Comma-separated list of child node addresses (parent only)")
 	port := flag.String("port", "8080", "Port to run this node on")
+	walPath := flag.String("wal", "", "Path to write-ahead log file (parent only). Empty means no persistence")
 
 	// flag.Parse() reads the command-line arguments and fills in the flag variables above.
 	flag.Parse()
@@ -47,6 +48,21 @@ func main() {
 	}
 
 	node := NewNode(*isParent, parentNodeEnv, childNodeList, selfAddress)
+
+	if node.isParent && *walPath != "" {
+		data, err := ReplayWAL(*walPath)
+		if err != nil {
+			log.Fatalf("Failed to replay WAL: %v", err)
+		}
+		node.data = data
+
+		wal, err := OpenWAL(*walPath)
+		if err != nil {
+			log.Fatalf("Failed to open WAL: %v", err)
+		}
+		node.wal = wal
+		fmt.Printf("Recovered %d keys from %s\n", len(data), *walPath)
+	}
 
 	// A child must join the cluster before serving: register, then catch up
 	if !node.isParent {

@@ -1,3 +1,4 @@
 # compiled binary
 /Distributed-Database
 distdb
+*.wal

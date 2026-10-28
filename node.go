@@ -21,6 +21,7 @@ type Node struct {
 	parentNode string
 	// how OTHER nodes can reach THIS node over network
 	selfAddress string
+	wal         *WAL
 }
 
 // NewNode is a constructor, and it returns a *Node.
