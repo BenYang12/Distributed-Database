@@ -172,3 +172,16 @@ func (n *Node) SetParentNode(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "Parent node updated to: %s\n", newParent)
 
 }
+
+func (n *Node) Children(w http.ResponseWriter, r *http.Request) {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+
+	if !n.isParent {
+		http.Error(w, "Only parent nodes have children", http.StatusServiceUnavailable)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(n.childNodes)
+}

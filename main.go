@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 )
 
 // Entry point
@@ -79,6 +80,12 @@ func main() {
 		}
 	}
 
+	if node.isParent {
+		go node.monitorChildren(2*time.Second, 3)
+	} else {
+		go node.monitorParent(2*time.Second, 3)
+	}
+
 	// Get
 	http.HandleFunc("/get", node.Get)
 	// Put
@@ -96,6 +103,7 @@ func main() {
 	http.HandleFunc("/replicate", node.Replicate)
 	http.HandleFunc("/setParent", node.SetParentNode)
 	http.HandleFunc("/addChild", node.AddChildNode)
+	http.HandleFunc("/children", node.Children)
 
 	fmt.Printf("Node running on port %s (Parent: %v, Parent Node: %s, Child Nodes: %v)\n", *port, *isParent, node.parentNode, childNodeList)
 	fmt.Println("Self address detected as:", selfAddress)
