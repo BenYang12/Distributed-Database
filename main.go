@@ -20,6 +20,7 @@ func main() {
 	childNodes := flag.String("childNodes", "", "Comma-separated list of child node addresses (parent only)")
 	port := flag.String("port", "8080", "Port to run this node on")
 	walPath := flag.String("wal", "", "Path to write-ahead log file (parent only). Empty means no persistence")
+	shards := flag.String("shards", "", "Comma-separated list of every shard's parent address. Empty means no sharding")
 
 	// flag.Parse() reads the command-line arguments and fills in the flag variables above.
 	flag.Parse()
@@ -49,6 +50,10 @@ func main() {
 	}
 
 	node := NewNode(*isParent, parentNodeEnv, childNodeList, selfAddress)
+
+	if *shards != "" {
+		node.ring = NewRing(strings.Split(*shards, ","), 100)
+	}
 
 	if node.isParent && *walPath != "" {
 		data, err := ReplayWAL(*walPath)

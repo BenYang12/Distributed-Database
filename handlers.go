@@ -21,6 +21,10 @@ func (n *Node) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if n.redirectToOwner(w, r, key) {
+		return
+	}
+
 	// Take a READ lock: many Get requests can hold this at the same time
 	// However, if a writer is mid-write, we wait until it's done
 	n.mu.RLock()
@@ -44,6 +48,20 @@ func (n *Node) Get(w http.ResponseWriter, r *http.Request) {
 
 // Put handles write requests: POST /put with a JSON body {"key":"...","value":"..."}
 func (n *Node) Put(w http.ResponseWriter, r *http.Request) {
+	if n.ring != nil {
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "Failed to read request body", http.StatusInternalServerError)
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+
+		var body map[string]string
+		json.Unmarshal(bodyBytes, &body)
+		if n.redirectToOwner(w, r, body["key"]) {
+			return
+		}
+	}
 
 	// CHILD BRANCH: child must not store writes -> forwards to the parent
 	if !n.isParent {
@@ -173,6 +191,10 @@ func (n *Node) Delete(w http.ResponseWriter, r *http.Request) {
 	// Replication push from parent? header tells us.
 	// r.Header.Get returns "" if header is absent, so this is false for ordinary client requests and true only for parent-steamped ones.
 	isReplication := r.Header.Get("X-Replication") == "true"
+
+	if !isReplication && n.redirectToOwner(w, r, key) {
+		return
+	}
 
 	// CHILD BRANCH
 	if !n.isParent {
