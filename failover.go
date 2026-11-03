@@ -19,7 +19,7 @@ func (n *Node) monitorParent(interval time.Duration, maxFailures int) {
 		parent := n.parentNode
 		n.mu.RUnlock()
 
-		resp, err := healthClient.Get("http://" + parent + "/children")
+		resp, err := peerClient.Get("http://" + parent + "/children")
 		if err == nil {
 			var children []string
 			decodeErr := json.NewDecoder(resp.Body).Decode(&children)
@@ -71,6 +71,9 @@ func (n *Node) promote(children []string) {
 	n.isParent = true
 	n.parentNode = ""
 	n.childNodes = children
+	for _, v := range n.versions {
+		n.version = max(n.version, v)
+	}
 	n.mu.Unlock()
 
 	log.Printf("Failover: promoted to parent, children are %v", children)

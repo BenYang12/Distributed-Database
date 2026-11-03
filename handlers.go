@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 )
 
 // Get handles read requests: GET /get?key=...
@@ -25,6 +26,11 @@ func (n *Node) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if readQuorum, _ := strconv.Atoi(r.URL.Query().Get("r")); readQuorum > 1 {
+		n.quorumGet(w, key, readQuorum)
+		return
+	}
+
 	// Take a READ lock: many Get requests can hold this at the same time
 	// However, if a writer is mid-write, we wait until it's done
 	n.mu.RLock()
@@ -33,6 +39,7 @@ func (n *Node) Get(w http.ResponseWriter, r *http.Request) {
 	// 		1. value -> stored value
 	// 		2. exists -> bool
 	value, exists := n.data[key]
+	version := n.versions[key]
 
 	n.mu.RUnlock()
 
@@ -41,6 +48,7 @@ func (n *Node) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	w.Header().Set("X-Version", strconv.FormatUint(version, 10))
 	w.WriteHeader(http.StatusOK)
 	// Fprintf is like printf, but writes to w
 	fmt.Fprintf(w, "Value: %s\n", value)
@@ -85,7 +93,7 @@ func (n *Node) Put(w http.ResponseWriter, r *http.Request) {
 
 		// Build a NEW POST request to the parent's /put
 		// use http.NewRequest (not http.Post) b/c I need to set headers.
-		url := "http://" + n.parentNode + "/put"
+		url := "http://" + n.parentNode + r.URL.RequestURI()
 		req, err := http.NewRequest("POST", url, bytes.NewBuffer(bodyBytes))
 		if err != nil {
 			http.Error(w, "Failed to create request to parent node", http.StatusInternalServerError)
@@ -152,19 +160,41 @@ func (n *Node) Put(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	writeQuorum, _ := strconv.Atoi(r.URL.Query().Get("w"))
+	writeQuorum = max(writeQuorum, 1)
+
 	n.mu.Lock()
+	if writeQuorum > len(n.childNodes)+1 {
+		n.mu.Unlock()
+		http.Error(w, fmt.Sprintf("w=%d but only %d replicas", writeQuorum, len(n.childNodes)+1), http.StatusBadRequest)
+		return
+	}
+	n.version++
+	version := n.version
 	if n.wal != nil {
-		if err := n.wal.Append(logEntry{Op: "put", Key: key, Value: value}); err != nil {
+		if err := n.wal.Append(logEntry{Op: "put", Key: key, Value: value, Version: version}); err != nil {
 			n.mu.Unlock()
 			http.Error(w, "Failed to persist write", http.StatusInternalServerError)
 			return
 		}
 	}
 	n.data[key] = value // the actual store
+	n.versions[key] = version
 	n.mu.Unlock()
 
-	n.replicateToChildren(key, value)
+	acks, total := n.replicateToChildren(key, value, version)
+	stored := 1
+	for i := 0; i < total && stored < writeQuorum; i++ {
+		if <-acks {
+			stored++
+		}
+	}
+	if stored < writeQuorum {
+		http.Error(w, fmt.Sprintf("Stored on only %d of %d required replicas", stored, writeQuorum), http.StatusServiceUnavailable)
+		return
+	}
 
+	w.Header().Set("X-Version", strconv.FormatUint(version, 10))
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintf(w, "Stored: %s -> %s\n", key, value)
 
@@ -212,6 +242,7 @@ func (n *Node) Delete(w http.ResponseWriter, r *http.Request) {
 		// in this case, it is a replication, so  just apply locally and don't forward
 		n.mu.Lock()
 		delete(n.data, key)
+		delete(n.versions, key)
 		n.mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, "Replicated deletion of key: %s\n", key)
@@ -228,6 +259,7 @@ func (n *Node) Delete(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	delete(n.data, key)
+	delete(n.versions, key)
 	n.mu.Unlock()
 
 	// Fan out deletion to every child (stamped as replication)
@@ -286,9 +318,11 @@ func (n *Node) Replicate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Missing key or value in replication data", http.StatusBadRequest)
 		return
 	}
+	version, _ := strconv.ParseUint(body["version"], 10, 64)
 
 	n.mu.Lock()
 	n.data[key] = value
+	n.versions[key] = version
 	n.mu.Unlock()
 
 	w.WriteHeader(http.StatusOK)

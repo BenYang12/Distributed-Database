@@ -23,6 +23,8 @@ type Node struct {
 	selfAddress string
 	wal         *WAL
 	ring        *Ring
+	versions    map[string]uint64
+	version     uint64
 }
 
 // NewNode is a constructor, and it returns a *Node.
@@ -34,6 +36,7 @@ func NewNode(isParent bool, parentNode string, childNodes []string, selfAddress 
 	// &Node{...} creates a Node and immediately takes its address
 	return &Node{
 		data:        make(map[string]string),
+		versions:    make(map[string]uint64),
 		isParent:    isParent,
 		parentNode:  parentNode,
 		childNodes:  childNodes,

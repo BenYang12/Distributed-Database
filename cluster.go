@@ -93,6 +93,7 @@ func (n *Node) synchronizeData() error {
 	// REPLACE local map under write lock
 	n.mu.Lock()
 	n.data = data
+	n.versions = make(map[string]uint64)
 	n.mu.Unlock()
 	return nil
 }

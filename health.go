@@ -6,10 +6,10 @@ import (
 	"time"
 )
 
-var healthClient = &http.Client{Timeout: 1 * time.Second}
+var peerClient = &http.Client{Timeout: 1 * time.Second}
 
 func isAlive(addr string) bool {
-	resp, err := healthClient.Get("http://" + addr + "/")
+	resp, err := peerClient.Get("http://" + addr + "/")
 	if err != nil {
 		return false
 	}

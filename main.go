@@ -56,11 +56,15 @@ func main() {
 	}
 
 	if node.isParent && *walPath != "" {
-		data, err := ReplayWAL(*walPath)
+		data, versions, err := ReplayWAL(*walPath)
 		if err != nil {
 			log.Fatalf("Failed to replay WAL: %v", err)
 		}
 		node.data = data
+		node.versions = versions
+		for _, v := range versions {
+			node.version = max(node.version, v)
+		}
 
 		wal, err := OpenWAL(*walPath)
 		if err != nil {

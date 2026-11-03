@@ -11,9 +11,10 @@ import (
 )
 
 type logEntry struct {
-	Op    string `json:"op"`
-	Key   string `json:"key"`
-	Value string `json:"value,omitempty"`
+	Op      string `json:"op"`
+	Key     string `json:"key"`
+	Value   string `json:"value,omitempty"`
+	Version uint64 `json:"version,omitempty"`
 }
 
 type WAL struct {
@@ -36,15 +37,16 @@ func (w *WAL) Append(e logEntry) error {
 	return w.file.Sync()
 }
 
-func ReplayWAL(path string) (map[string]string, error) {
+func ReplayWAL(path string) (map[string]string, map[string]uint64, error) {
 	data := make(map[string]string)
+	versions := make(map[string]uint64)
 
 	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return data, nil
+		return data, versions, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer f.Close()
 
@@ -61,7 +63,7 @@ func ReplayWAL(path string) (map[string]string, error) {
 			break
 		}
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		var e logEntry
@@ -70,14 +72,16 @@ func ReplayWAL(path string) (map[string]string, error) {
 				torn = true
 				break
 			}
-			return nil, fmt.Errorf("corrupt WAL entry at byte %d: %w", goodBytes, err)
+			return nil, nil, fmt.Errorf("corrupt WAL entry at byte %d: %w", goodBytes, err)
 		}
 
 		switch e.Op {
 		case "put":
 			data[e.Key] = e.Value
+			versions[e.Key] = e.Version
 		case "delete":
 			delete(data, e.Key)
+			delete(versions, e.Key)
 		}
 		goodBytes += int64(len(line))
 	}
@@ -85,8 +89,8 @@ func ReplayWAL(path string) (map[string]string, error) {
 	if torn {
 		log.Printf("WAL: damaged tail found, truncating %s to %d bytes", path, goodBytes)
 		if err := os.Truncate(path, goodBytes); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
-	return data, nil
+	return data, versions, nil
 }
